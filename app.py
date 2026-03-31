@@ -3,6 +3,9 @@ import streamlit as st
 import os
 import json
 import re
+import io
+import hashlib
+import html
 import numpy as np
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
@@ -105,6 +108,28 @@ st.markdown("""
     box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5);
     font-family: 'Inter', sans-serif;
 }
+.red-flag-card {
+    background: radial-gradient(circle at top right, rgba(255, 0, 60, 0.22), rgba(20, 12, 18, 0.96));
+    border: 1px solid rgba(255, 0, 60, 0.7);
+    border-left: 4px solid #FF003C;
+    border-radius: 12px;
+    padding: 1rem 1.2rem;
+    margin-top: 0.8rem;
+    color: #FFE6EE;
+    box-shadow: 0 0 18px rgba(255, 0, 60, 0.35), inset 0 0 12px rgba(255, 0, 60, 0.1);
+}
+.red-flag-card h4 {
+    margin: 0 0 0.55rem;
+    font-family: 'Orbitron', sans-serif;
+    letter-spacing: 0.6px;
+    color: #FF6B90;
+}
+.red-flag-card p {
+    margin: 0;
+    white-space: pre-wrap;
+    font-family: 'Inter', sans-serif;
+    line-height: 1.45;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,7 +159,7 @@ with st.sidebar:
     st.success("✅ Auto Re-query if < 60%")
     st.success("✅ Hybrid Dense + BM25")
     st.markdown("---")
-    st.caption("VIT Chennai — Legal RAG Research Project")
+    st.caption("Legal RAG Research Project")
 
 # ─── Load Models (cached) ─────────────────────────────────────────────
 @st.cache_resource
@@ -143,6 +168,54 @@ def load_model():
         return SentenceTransformer("nlpaueb/legal-bert-base-uncased")
     except:
         return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+def build_red_flag_sample(text: str, max_chars: int = 12000) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    span = max_chars // 3
+    mid_start = max(0, (len(cleaned) // 2) - (span // 2))
+    return (
+        cleaned[:span]
+        + "\n\n[... middle excerpt ...]\n\n"
+        + cleaned[mid_start:mid_start + span]
+        + "\n\n[... ending excerpt ...]\n\n"
+        + cleaned[-span:]
+    )
+
+
+def scan_red_flags(sample_text: str, api_key: str) -> str:
+    client = Groq(api_key=api_key)
+    prompt = f"""You are a legal risk analyst.
+Scan the legal text and list at most 3 potential red flags.
+Focus on unusual liabilities, predatory terms, aggressive termination rights, broad indemnities, data/privacy risks, or one-sided obligations.
+Return concise bullet points only.
+If no clear risk appears, return exactly one bullet: - No obvious red flags found in provided text.
+
+LEGAL TEXT:
+{sample_text}
+"""
+    resp = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=220,
+        temperature=0.1,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def render_red_flags(red_flags_text: str):
+    safe_text = html.escape(red_flags_text)
+    st.markdown(
+        f"""
+<div class="red-flag-card">
+    <h4>🚨 Potential Red Flags</h4>
+    <p>{safe_text}</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 # ─── Core Classes (inline for single-file app) ────────────────────────
 class AppChunker:
@@ -177,6 +250,11 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📄 Step 1: Upload Legal Document")
+    auto_scan_red_flags = st.checkbox(
+        "Auto-scan for risks after indexing",
+        value=True,
+        help="Disable this to run the risk scan manually and save API tokens."
+    )
     uploaded_file = st.file_uploader(
         "Upload a legal PDF",
         type=["pdf"],
@@ -184,46 +262,107 @@ with col1:
     )
 
     if uploaded_file:
-        with st.spinner("Reading PDF..."):
-            reader = PdfReader(uploaded_file)
-            full_text = ""
-            for page in reader.pages:
-                t = page.extract_text()
-                if t:
-                    full_text += t + "\n"
+        pdf_bytes = uploaded_file.getvalue()
+        doc_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        is_new_document = st.session_state.get("doc_hash") != doc_hash
 
-        st.success(f"✅ Loaded: {len(reader.pages)} pages, {len(full_text):,} characters")
+        if is_new_document:
+            with st.spinner("Reading PDF..."):
+                reader = PdfReader(io.BytesIO(pdf_bytes))
+                full_text = ""
+                for page in reader.pages:
+                    t = page.extract_text()
+                    if t:
+                        full_text += t + "\n"
 
-        if not api_key:
-            st.warning("⚠️ Please enter your Groq API key in the sidebar.")
+            st.success(f"✅ Loaded: {len(reader.pages)} pages, {len(full_text):,} characters")
+
+            if not api_key:
+                st.warning("⚠️ Please enter your Groq API key in the sidebar.")
+            else:
+                model = load_model()
+                chunker = AppChunker()
+
+                with st.spinner("🔪 Applying clause-aware chunking..."):
+                    chunks = chunker.chunk(full_text)
+
+                with st.spinner(f"🧠 Embedding {len(chunks)} clauses..."):
+                    texts = [c["text"] for c in chunks]
+                    embeds = model.encode(texts, batch_size=32)
+                    embeds_f32 = np.array(embeds).astype("float32")
+                    dim = embeds_f32.shape[1]
+                    index = faiss.IndexFlatL2(dim)
+                    index.add(embeds_f32)
+                    bm25 = BM25Okapi([t.lower().split() for t in texts])
+
+                red_flag_sample = build_red_flag_sample(full_text)
+
+                st.session_state["ready"] = True
+                st.session_state["chunks"] = chunks
+                st.session_state["index"] = index
+                st.session_state["embeds"] = embeds_f32
+                st.session_state["bm25"] = bm25
+                st.session_state["model"] = model
+                st.session_state["api_key"] = api_key
+                st.session_state["doc_hash"] = doc_hash
+                st.session_state["doc_pages"] = len(reader.pages)
+                st.session_state["doc_chars"] = len(full_text)
+                st.session_state["red_flag_sample"] = red_flag_sample
+                st.session_state["red_flags"] = None
+
+                st.info(f"📦 Indexed {len(chunks)} clauses. Ready to answer questions!")
+
+                if auto_scan_red_flags:
+                    with st.spinner("🚨 Scanning for legal red flags..."):
+                        try:
+                            red_flags_text = scan_red_flags(red_flag_sample, api_key)
+                        except Exception as e:
+                            red_flags_text = f"Red flag scan unavailable: {e}"
+                    st.session_state["red_flags"] = red_flags_text
         else:
-            model = load_model()
-            chunker = AppChunker()
+            st.success(
+                f"✅ Loaded: {st.session_state.get('doc_pages', 0)} pages, "
+                f"{st.session_state.get('doc_chars', 0):,} characters"
+            )
+            st.info(f"📦 Indexed {len(st.session_state.get('chunks', []))} clauses. Ready to answer questions!")
 
-            with st.spinner("🔪 Applying clause-aware chunking..."):
-                chunks = chunker.chunk(full_text)
+            if api_key:
+                st.session_state["api_key"] = api_key
 
-            with st.spinner(f"🧠 Embedding {len(chunks)} clauses..."):
-                texts = [c["text"] for c in chunks]
-                embeds = model.encode(texts, batch_size=32)
-                embeds_f32 = np.array(embeds).astype("float32")
-                dim = embeds_f32.shape[1]
-                index = faiss.IndexFlatL2(dim)
-                index.add(embeds_f32)
-                bm25 = BM25Okapi([t.lower().split() for t in texts])
+            if auto_scan_red_flags and st.session_state.get("red_flags") is None and api_key:
+                with st.spinner("🚨 Scanning for legal red flags..."):
+                    try:
+                        st.session_state["red_flags"] = scan_red_flags(st.session_state.get("red_flag_sample", ""), api_key)
+                    except Exception as e:
+                        st.session_state["red_flags"] = f"Red flag scan unavailable: {e}"
 
-            st.session_state["ready"] = True
-            st.session_state["chunks"] = chunks
-            st.session_state["index"] = index
-            st.session_state["embeds"] = embeds_f32
-            st.session_state["bm25"] = bm25
-            st.session_state["model"] = model
-            st.session_state["api_key"] = api_key
+        if st.session_state.get("ready") and st.session_state.get("doc_hash") == doc_hash:
+            if not auto_scan_red_flags:
+                if st.button("🚨 Scan for Risks", use_container_width=True):
+                    if not api_key:
+                        st.warning("⚠️ Add your Groq API key to run risk scanning.")
+                    else:
+                        with st.spinner("🚨 Scanning for legal red flags..."):
+                            try:
+                                st.session_state["red_flags"] = scan_red_flags(
+                                    st.session_state.get("red_flag_sample", ""),
+                                    api_key,
+                                )
+                            except Exception as e:
+                                st.session_state["red_flags"] = f"Red flag scan unavailable: {e}"
 
-            st.info(f"📦 Indexed {len(chunks)} clauses. Ready to answer questions!")
+            if st.session_state.get("red_flags"):
+                render_red_flags(st.session_state["red_flags"])
 
 with col2:
     st.subheader("❓ Step 2: Ask Your Question")
+    tone_mode = st.select_slider(
+        "Answer Tone",
+        options=["ELI5 (Layman)", "Standard", "Strict Legalese"],
+        value="Standard",
+        help="Adjust the legal answer style without changing retrieval quality."
+    )
+
     question = st.text_area(
         "Type your legal question in plain English",
         placeholder="e.g. What are the payment terms?\nCan either party terminate early?\nWho owns the intellectual property?",
@@ -259,7 +398,14 @@ with col2:
 
             with st.spinner("🤖 Generating answer..."):
                 client = Groq(api_key=key)
+                tone_instructions = {
+                    "ELI5 (Layman)": "You must explain the answer in extremely simple, 5th-grade English. Use bullet points. Avoid legal jargon.",
+                    "Standard": "Answer clearly and accurately.",
+                    "Strict Legalese": "Answer using strict corporate legal terminology. Frame the response as a formal legal memo.",
+                }
+                selected_tone_instruction = tone_instructions.get(tone_mode, tone_instructions["Standard"])
                 prompt = f"""You are a legal document assistant. Answer using ONLY the provided legal text. Cite the specific clause.
+TONE REQUIREMENT: {selected_tone_instruction}
 
 LEGAL TEXT:
 {context}
@@ -322,4 +468,4 @@ Context: {context[:400]}"""
 
 # ─── Footer ───────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("Vertisa AI | VIT Chennai | Enhanced Legal Document QA System")
+st.caption("Vertisa AI | Enhanced Legal Document QA System")
