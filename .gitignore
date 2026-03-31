@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info
+dist
+build
+*.egg
+*.log
+*.bak
+*.tmp
+*.swp
