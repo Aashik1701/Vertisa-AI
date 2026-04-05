@@ -62,7 +62,7 @@ CLAIM_GROUNDING_FIELDS = [
 # ─── Page Config ─────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Vertisa AI",
-    page_icon="⚖️",
+    page_icon="",
     layout="wide"
 )
 
@@ -994,7 +994,7 @@ st.caption("Use Step 1 and Step 2 below. Full analysis outputs appear in the wid
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("📄 Step 1: Upload Legal Document")
+    st.subheader("Step 1: Upload Legal Document")
     auto_scan_red_flags = st.checkbox(
         "Auto-scan for risks after indexing",
         value=True,
@@ -1116,7 +1116,7 @@ with col1:
                 render_red_flags(st.session_state["red_flags"])
 
 with col2:
-    st.subheader("❓ Step 2: Ask Your Question")
+    st.subheader("Step 2: Ask Your Question")
     tone_mode = st.select_slider(
         "Answer Tone",
         options=["ELI5 (Layman)", "Standard", "Strict Legalese"],
