@@ -1180,7 +1180,7 @@ with col2:
 
             with st.spinner("🔍 Retrieving relevant clauses..."):
                 q_embed = model_obj.encode([question]).astype("float32")
-                _, idxs = index.search(q_embed, min(5, len(chunks)))
+                _, idxs = index.search(q_embed, min(15, len(chunks)))
                 bm25_scores = bm25.get_scores(question.lower().split())
                 combined = {}
                 for i, idx in enumerate(idxs[0]):
@@ -1188,7 +1188,7 @@ with col2:
                         combined[idx] = combined.get(idx, 0) + 0.6
                 for i, score in enumerate(bm25_scores):
                     combined[i] = combined.get(i, 0) + 0.4 * (score / (max(bm25_scores) + 1e-9))
-                top_idxs = sorted(combined, key=combined.get, reverse=True)[:3]
+                top_idxs = sorted(combined, key=combined.get, reverse=True)[:8]
                 top_chunks = [chunks[i] for i in top_idxs if i < len(chunks)]
 
             client = Groq(api_key=key)

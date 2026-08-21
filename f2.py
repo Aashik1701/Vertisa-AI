@@ -60,6 +60,16 @@ OVERRIDE_KEYWORDS = [
     "override",
     "supersede",
     "govern",
+    "waive",
+    "waiver",
+    "amend",
+    "amendment",
+    "restrict",
+    "shall not appoint",
+    "shall not exercise",
+    "in lieu of",
+    "prior to the listing",
+    "prior to listing",
 ]
 
 # Patterns to detect which section a chunk IS (its identity)
@@ -68,6 +78,44 @@ IDENTITY_PATTERNS = [
     r"^(\d+(?:\.\d+)+)\s+[-–—]",  # "4.1 - Termination"
     r"^(?:exhibit|schedule|annex)\s+([A-Z0-9]+)",
 ]
+
+# Matches defined-term declarations common in prospectuses/agreements, e.g.
+# ("Waiver Letter"), (the "Shareholders' Agreement"), (“SHA”)
+DEFINED_TERM_PATTERN = re.compile(
+    r"\((?:the\s+)?[\"“]([A-Z][A-Za-z0-9 ,.'&/-]{1,60}?)[\"”]\)"
+)
+
+# Only terms that name a LEGAL INSTRUMENT (an agreement/letter/etc that can
+# itself modify or override another clause) become graph nodes. Without this
+# filter, every defined party/company/regulator name in the document (e.g.
+# "SEBI", "Spoton", "Aramex", "Assignor") gets treated as a cross-reference
+# target, and the graph turns into a hairball linking any two chunks that
+# happen to mention the same entity — flooding GraphRAG expansion with
+# dozens of irrelevant clauses instead of the handful that actually matter.
+INSTRUMENT_TERM_KEYWORDS = (
+    "agreement", "letter", "waiver", "amendment", "addendum", "deed",
+    "articles", "undertaking", "arrangement", "contract", "scheme",
+    "policy", "resolution", "certificate", "memorandum", "charter", "bylaw",
+)
+KNOWN_INSTRUMENT_ACRONYMS = {
+    "sha", "spa", "ssa", "sshа", "nda", "mou", "rofr", "rofo", "drhp", "rhp",
+}
+
+
+def _is_instrument_term(term: str) -> bool:
+    term_lower = term.lower().strip()
+    if any(kw in term_lower for kw in INSTRUMENT_TERM_KEYWORDS):
+        return True
+    if term_lower in KNOWN_INSTRUMENT_ACRONYMS:
+        return True
+    return False
+
+
+# How many characters of context around a cross-reference to scan for an
+# override keyword. Proximity-based, not whole-chunk — a chunk can legitimately
+# contain the word "govern" or "restrict" far away from an unrelated entity
+# mention, and that must not be misread as "this entity overrides this clause".
+OVERRIDE_PROXIMITY_WINDOW = 100
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +166,33 @@ class LegalKnowledgeGraph:
                     return f"section {match.group(1)}"  # default
         return None
 
+    def _detect_defined_terms(self, chunk: str) -> list[str]:
+        """
+        Find named legal instruments/defined terms declared in this chunk,
+        e.g. ("Waiver Letter"), (the "Shareholders' Agreement").
+
+        Numbered clause identity (Section/Article/etc.) covers contracts;
+        prospectuses and deal documents instead cross-reference each other
+        by NAME ("the Waiver Letter modifies the SHA"), so those named
+        instruments need to become graph nodes too. Only terms that name an
+        actual instrument (agreement/letter/waiver/...) qualify — a defined
+        party or company name is not something another clause can be
+        "subject to" or overridden by.
+        """
+        return [
+            m.group(1).strip().lower()
+            for m in DEFINED_TERM_PATTERN.finditer(chunk)
+            if _is_instrument_term(m.group(1))
+        ]
+
+    def _has_override_nearby(self, chunk_lower: str, start: int, end: int) -> bool:
+        """Was an override keyword used near THIS specific reference, not just
+        somewhere in the chunk?"""
+        window_start = max(0, start - OVERRIDE_PROXIMITY_WINDOW)
+        window_end = min(len(chunk_lower), end + OVERRIDE_PROXIMITY_WINDOW)
+        window = chunk_lower[window_start:window_end]
+        return any(kw in window for kw in OVERRIDE_KEYWORDS)
+
     def _find_references(self, chunk: str) -> list[dict]:
         """
         Scan a chunk for all cross-references it makes.
@@ -126,16 +201,27 @@ class LegalKnowledgeGraph:
         chunk_lower = chunk.lower()
         found_refs = []
 
-        has_override = any(kw in chunk_lower for kw in OVERRIDE_KEYWORDS)
-
         for pattern, ref_type in REFERENCE_PATTERNS:
             matches = re.finditer(pattern, chunk, re.IGNORECASE)
             for match in matches:
                 ref_key = self._normalize_ref(ref_type, match.group(1))
                 found_refs.append({
                     "ref_key": ref_key,
-                    "has_override": has_override,
+                    "has_override": self._has_override_nearby(chunk_lower, match.start(), match.end()),
                     "raw_match": match.group(0),
+                })
+
+        # Named-instrument references, e.g. a clause that mentions
+        # "the Waiver Letter" elsewhere after it was declared/defined.
+        for term_key in self.chunk_ids:
+            if not term_key.startswith("term "):
+                continue
+            term_text = term_key[len("term "):]
+            for match in re.finditer(r"\b" + re.escape(term_text) + r"\b", chunk_lower):
+                found_refs.append({
+                    "ref_key": term_key,
+                    "has_override": self._has_override_nearby(chunk_lower, match.start(), match.end()),
+                    "raw_match": term_text,
                 })
 
         return found_refs
@@ -159,6 +245,13 @@ class LegalKnowledgeGraph:
             if identity:
                 self.graph.nodes[i]["identity"] = identity
                 self.chunk_ids[identity] = i
+
+            for term in self._detect_defined_terms(chunk):
+                term_key = f"term {term}"
+                # First chunk to declare a term "owns" it as a target node.
+                self.chunk_ids.setdefault(term_key, i)
+                if not self.graph.nodes[i]["identity"]:
+                    self.graph.nodes[i]["identity"] = term_key
 
         # ── Pass 2: Find what each chunk REFERENCES ───────────────────────────
         for i, chunk in enumerate(chunks):
@@ -186,7 +279,8 @@ class LegalKnowledgeGraph:
     def expand_with_graph(
         self,
         initial_chunk_indices: list[int],
-        max_hops: int = 2
+        max_hops: int = 2,
+        max_extra_clauses: int = 12,
     ) -> tuple[list[str], list[dict]]:
         """
         Given initial retrieved chunk indices, follow graph edges to
@@ -195,6 +289,12 @@ class LegalKnowledgeGraph:
         Args:
             initial_chunk_indices: Top-K chunk indices from standard retrieval
             max_hops: How many "levels" of references to follow (default: 2)
+            max_extra_clauses: Hard cap on how many chunks graph expansion may
+                add on top of the initial retrieval set. Without this, a few
+                over-connected nodes (e.g. a widely-referenced defined term)
+                can snowball into dozens of tangentially-related clauses,
+                diluting the prompt and burying the clause that actually
+                answers the question ("lost in the middle").
 
         Returns:
             (expanded_chunks, expansion_log)
@@ -207,8 +307,13 @@ class LegalKnowledgeGraph:
         expanded_indices = set(initial_chunk_indices)
         expansion_log = []
 
+        def extra_count() -> int:
+            return len(expanded_indices) - len(initial_chunk_indices)
+
         frontier = set(initial_chunk_indices)
         for hop in range(max_hops):
+            if extra_count() >= max_extra_clauses:
+                break
             new_frontier = set()
             for node in frontier:
                 if node not in self.graph:
@@ -216,6 +321,8 @@ class LegalKnowledgeGraph:
 
                 # Follow outgoing edges (clauses this one references)
                 for successor in self.graph.successors(node):
+                    if extra_count() >= max_extra_clauses:
+                        break
                     if successor not in expanded_indices:
                         edge_data = self.graph.edges[node, successor]
                         is_override = edge_data.get("has_override", False)
@@ -229,11 +336,16 @@ class LegalKnowledgeGraph:
                         expanded_indices.add(successor)
                         new_frontier.add(successor)
 
+                if extra_count() >= max_extra_clauses:
+                    break
+
                 # Follow INCOMING edges (clauses that override THIS one)
                 # This is critical — if standard RAG retrieves 4.1, we must
                 # also pull 9.3 which modifies 4.1, even though 4.1 doesn't
                 # reference 9.3 directly.
                 for predecessor in self.graph.predecessors(node):
+                    if extra_count() >= max_extra_clauses:
+                        break
                     if predecessor not in expanded_indices:
                         edge_data = self.graph.edges[predecessor, node]
                         is_override = edge_data.get("has_override", False)
@@ -246,6 +358,9 @@ class LegalKnowledgeGraph:
                         })
                         expanded_indices.add(predecessor)
                         new_frontier.add(predecessor)
+
+                if extra_count() >= max_extra_clauses:
+                    break
 
             frontier = new_frontier
             if not frontier:
