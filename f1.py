@@ -70,7 +70,7 @@ def _call_groq_sync(client: Groq, prompt: str, persona_label: str) -> dict:
     """
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=[
                 {
                     "role": "system",
@@ -78,8 +78,9 @@ def _call_groq_sync(client: Groq, prompt: str, persona_label: str) -> dict:
                 },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=400,
+            max_tokens=700,
             temperature=0.4,
+            reasoning_effort="low",
         )
         return {
             "persona": persona_label,

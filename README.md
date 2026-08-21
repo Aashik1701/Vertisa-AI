@@ -6,7 +6,7 @@
 ![Groq](https://img.shields.io/badge/Inference-Groq-orange.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-gray.svg)
 
-An advanced Retrieval-Augmented Generation (RAG) system engineered specifically for legal documents. Vertisa AI enables lawyers, students, and businesses to upload complex legal PDFs (contracts, privacy policies, merger agreements) and ask plain English questions to receive precise, cited answers backed by confidence scoring, risk scanning, reference-aware GraphRAG, retrieval comparison visualizations, and multi-agent legal debate.
+An advanced Retrieval-Augmented Generation (RAG) system engineered specifically for legal documents. Vertisa AI enables lawyers, students, and businesses to upload complex legal PDFs (contracts, privacy policies, merger agreements) and ask plain English questions to receive precise, cited answers backed by confidence scoring, risk scanning, reference-aware GraphRAG, retrieval comparison visualizations, claim-level evidence auditing, and multi-agent legal debate.
 
 ---
 
@@ -30,9 +30,13 @@ This project significantly improves upon standard RAG pipelines by introducing p
    For each GraphRAG-enabled question, the UI renders side-by-side baseline Top-K clauses versus graph-expanded clauses so exception retrieval gains are presentation-ready for papers and demos.
 8. **GraphRAG Expansion CSV Logging (Per Question)** 🧾
    Every answered question appends operational GraphRAG metrics to `results/graphrag_expansion_log.csv` including hops requested, extra clauses added, override detection, graph trigger events, and confidence.
-9. **Multi-Agent Legal Debate (Plaintiff vs Defense vs Judge)** ⚖️
+9. **Claim-Evidence Audit + Auto-Repair (Paper Metrics)** 🧪
+   After generation, the app extracts claims from the answer, labels each claim as `SUPPORTED`, `WEAK`, or `UNSUPPORTED`, and computes claim support rate. If unsupported claims are found, an automatic re-generation pass attempts to repair the answer using stricter evidence guardrails.
+10. **Grounding Trend & Repair Telemetry Logging** 📈
+   Each query appends grounding metrics to `results/claim_grounding_log.csv` (claim support rate, unsupported counts, repair attempt/success, final grounded confidence), enabling quantitative analysis over time.
+11. **Multi-Agent Legal Debate (Plaintiff vs Defense vs Judge)** ⚖️
    The app launches three concurrent Groq calls on the same retrieved context and displays opposing legal interpretations side-by-side.
-10. **Broad Generalizability** 📈
+12. **Broad Generalizability** 📈
    Evaluated not just on one dataset, but across three distinct legal domains: CUAD (commercial contracts), MAUD (merger agreements), and PrivacyQA (app privacy policies).
 
 ---
@@ -56,9 +60,13 @@ graph LR
    Y --> H
    Y --> M["🧪 Baseline vs GraphRAG Comparison Panel"]
    Y --> N["🧾 Graph Expansion CSV Log (Per Question)"]
-   H --> I["🔍 Self-Reflection & Scoring"]
+   H --> I["🧾 Claim-Evidence Audit"]
+   I --> I2["♻️ Auto-Repair if Unsupported Claims"]
+   I2 --> I3["🔍 Self-Reflection & Final Confidence"]
    G --> K["⚖️ Parallel Debate Agents x3"]
-   I --> J["📋 Answer + Confidence + Sources"]
+   I3 --> J["📋 Answer + Confidence + Sources"]
+   I3 --> O["📈 Evidence Locker (Support Rate / Unsupported / Repair)"]
+   I3 --> P["🧾 Claim Grounding CSV Log"]
    K --> L["🧑‍⚖️ Plaintiff | Defense | Judge Views"]
 ```
 
@@ -75,7 +83,7 @@ graph LR
 ├── README.md               # Project documentation
 ├── notebooks/
 │   └── Vertisa_AI.ipynb    # Core research, pipeline evaluation, and benchmarking
-├── results/                # Evaluation output CSVs + GraphRAG runtime metrics logs
+├── results/                # Evaluation CSVs + GraphRAG logs + claim-grounding telemetry
 ├── graphs/                 # ROUGE/METEOR/BLEU benchmarking visualizations
 └── docs/                   # Additional documentation and assets
 ```
@@ -113,8 +121,10 @@ streamlit run app.py
 6. Optionally enable GraphRAG Cross-Reference Resolver (recommended for complex contracts).
 7. Ask your legal question.
 8. Review the Baseline vs GraphRAG comparison panel generated for GraphRAG-enabled runs.
-9. Check `results/graphrag_expansion_log.csv` for per-question GraphRAG metrics.
-10. Optionally enable Multi-Agent Legal Debate for side-by-side legal perspectives.
+9. Review the Evidence tab for claim support rate, unsupported claim count, auto-repair outcome, and confidence trend.
+10. Check `results/graphrag_expansion_log.csv` for per-question GraphRAG metrics.
+11. Check `results/claim_grounding_log.csv` for per-question claim-grounding metrics used in paper analysis.
+12. Optionally enable Multi-Agent Legal Debate for side-by-side legal perspectives.
 
 ---
 

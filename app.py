@@ -1,3 +1,10 @@
+import os
+import warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"  # Set to 1 later after model caches
+os.environ["HF_DATASETS_OFFLINE"] = "0"
+warnings.filterwarnings("ignore", category=UserWarning, message=".*TypedStorage is deprecated.*")
+warnings.filterwarnings("ignore", message=".*NotOpenSSLWarning.*")
 
 import streamlit as st
 import os
@@ -10,7 +17,7 @@ import html
 from datetime import datetime
 import numpy as np
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, models
 from rank_bm25 import BM25Okapi
 import faiss
 from groq import Groq
@@ -319,8 +326,16 @@ with st.sidebar:
 @st.cache_resource
 def load_model():
     try:
-        return SentenceTransformer("nlpaueb/legal-bert-base-uncased")
-    except:
+        word_embedding_model = models.Transformer("nlpaueb/legal-bert-base-uncased")
+        pooling_model = models.Pooling(
+            word_embedding_model.get_word_embedding_dimension(),
+            pooling_mode_mean_tokens=True,
+            pooling_mode_cls_token=False,
+            pooling_mode_max_tokens=False
+        )
+        return SentenceTransformer(modules=[word_embedding_model, pooling_model])
+    except Exception as e:
+        print(f"Failed to load legal-bert model: {e}. Falling back to all-MiniLM-L6-v2.")
         return SentenceTransformer("all-MiniLM-L6-v2")
 
 
@@ -351,10 +366,11 @@ LEGAL TEXT:
 {sample_text}
 """
     resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=220,
+        max_tokens=400,
         temperature=0.1,
+        reasoning_effort="low",
     )
     return resp.choices[0].message.content.strip()
 
@@ -473,10 +489,11 @@ LEGAL CONTEXT:
 
     try:
         resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=700,
+            max_tokens=900,
             temperature=0.0,
+            reasoning_effort="low",
         )
         raw = resp.choices[0].message.content
         parsed = _extract_json_dict(raw)
@@ -555,10 +572,11 @@ Return only the revised final answer text.
 """
 
     repaired = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=450,
+        max_tokens=650,
         temperature=0.1,
+        reasoning_effort="low",
     )
     new_answer = repaired.choices[0].message.content.strip()
     return new_answer if new_answer else answer
@@ -1231,10 +1249,11 @@ QUESTION: {question}
 
 ANSWER:"""
                     resp = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
+                        model="openai/gpt-oss-20b",
                         messages=[{"role": "user", "content": prompt}],
-                        max_tokens=400,
+                        max_tokens=800,
                         temperature=0.1,
+                        reasoning_effort="low",
                     )
                     answer = resp.choices[0].message.content.strip()
 
@@ -1306,9 +1325,10 @@ A: {answer}
 Context: {context_for_answer[:600]}"""
                 try:
                     r2 = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
+                        model="openai/gpt-oss-20b",
                         messages=[{"role": "user", "content": reflect_prompt}],
-                        max_tokens=150, temperature=0.0
+                        max_tokens=300, temperature=0.0,
+                        reasoning_effort="low",
                     )
                     raw = r2.choices[0].message.content
                     jm = re.search(r"\{.*\}", raw, re.DOTALL)

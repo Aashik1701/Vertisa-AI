@@ -352,7 +352,7 @@ def resolve_with_graph(
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=[
                 {
                     "role": "system",
@@ -370,8 +370,9 @@ def resolve_with_graph(
                     ),
                 },
             ],
-            max_tokens=600,
+            max_tokens=900,
             temperature=0.2,  # Low temp for legal precision
+            reasoning_effort="low",
         )
         answer_text = response.choices[0].message.content.strip()
     except Exception as e:
